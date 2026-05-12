@@ -19,44 +19,51 @@ def get_dynamodb_client():
     return boto3.client("dynamodb", region_name=AWS_REGION)
 
 
+def _create_table_if_not_exists(client, table_name: str, key_schema: list, attr_defs: list):
+    """Create a single DynamoDB table, ignoring if it already exists."""
+    try:
+        client.create_table(
+            TableName=table_name,
+            KeySchema=key_schema,
+            AttributeDefinitions=attr_defs,
+            BillingMode="PAY_PER_REQUEST",
+        )
+        waiter = client.get_waiter("table_exists")
+        waiter.wait(TableName=table_name)
+        print(f"Created table: {table_name}")
+    except client.exceptions.ResourceInUseException:
+        pass  # Table already exists
+
+
 def ensure_tables_exist():
     """Create DynamoDB tables if they don't already exist."""
     client = get_dynamodb_client()
-    existing = client.list_tables()["TableNames"]
 
-    if DYNAMO_TABLE_CLASSIFICATIONS not in existing:
-        client.create_table(
-            TableName=DYNAMO_TABLE_CLASSIFICATIONS,
-            KeySchema=[
-                {"AttributeName": "repo_slug", "KeyType": "HASH"},
-                {"AttributeName": "issue_number", "KeyType": "RANGE"},
-            ],
-            AttributeDefinitions=[
-                {"AttributeName": "repo_slug", "AttributeType": "S"},
-                {"AttributeName": "issue_number", "AttributeType": "N"},
-            ],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        waiter = client.get_waiter("table_exists")
-        waiter.wait(TableName=DYNAMO_TABLE_CLASSIFICATIONS)
-        print(f"Created table: {DYNAMO_TABLE_CLASSIFICATIONS}")
+    _create_table_if_not_exists(
+        client,
+        DYNAMO_TABLE_CLASSIFICATIONS,
+        key_schema=[
+            {"AttributeName": "repo_slug", "KeyType": "HASH"},
+            {"AttributeName": "issue_number", "KeyType": "RANGE"},
+        ],
+        attr_defs=[
+            {"AttributeName": "repo_slug", "AttributeType": "S"},
+            {"AttributeName": "issue_number", "AttributeType": "N"},
+        ],
+    )
 
-    if DYNAMO_TABLE_RECOMMENDATIONS not in existing:
-        client.create_table(
-            TableName=DYNAMO_TABLE_RECOMMENDATIONS,
-            KeySchema=[
-                {"AttributeName": "repo_slug", "KeyType": "HASH"},
-                {"AttributeName": "run_id", "KeyType": "RANGE"},
-            ],
-            AttributeDefinitions=[
-                {"AttributeName": "repo_slug", "AttributeType": "S"},
-                {"AttributeName": "run_id", "AttributeType": "S"},
-            ],
-            BillingMode="PAY_PER_REQUEST",
-        )
-        waiter = client.get_waiter("table_exists")
-        waiter.wait(TableName=DYNAMO_TABLE_RECOMMENDATIONS)
-        print(f"Created table: {DYNAMO_TABLE_RECOMMENDATIONS}")
+    _create_table_if_not_exists(
+        client,
+        DYNAMO_TABLE_RECOMMENDATIONS,
+        key_schema=[
+            {"AttributeName": "repo_slug", "KeyType": "HASH"},
+            {"AttributeName": "run_id", "KeyType": "RANGE"},
+        ],
+        attr_defs=[
+            {"AttributeName": "repo_slug", "AttributeType": "S"},
+            {"AttributeName": "run_id", "AttributeType": "S"},
+        ],
+    )
 
 
 def save_classifications(repo_slug: str, classifications: list[dict]):
