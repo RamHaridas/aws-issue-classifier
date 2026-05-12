@@ -45,6 +45,9 @@ GITHUB_ISSUE_BODY_MAX_CHARS = 500
 DYNAMO_TABLE_CLASSIFICATIONS = "IssueClassifications"
 DYNAMO_TABLE_RECOMMENDATIONS = "RecommendationResults"
 BEDROCK_MODEL_ID = "us.amazon.nova-lite-v1:0"
+
+# Workshop model (use if the above doesn't work in your region):
+# BEDROCK_MODEL_ID = "global.amazon.nova-2-lite-v1:0"
 AWS_REGION = "us-west-2"
 
 # --- Classifier ---

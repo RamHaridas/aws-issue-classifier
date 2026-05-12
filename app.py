@@ -1,5 +1,5 @@
 """
-GitHub Issue Analyzer — Streamlit Application (Stage 1)
+GitHub Issue Analyzer — Streamlit Application
 
 Usage:
     cd github_issue_analyzer
@@ -17,7 +17,7 @@ from github_fetcher import (
     fetch_repo_info,
     check_rate_limit,
 )
-from config import DATE_RANGE_OPTIONS
+from config import DATE_RANGE_OPTIONS, CATEGORIES, SEVERITIES
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +136,8 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 st.title("GitHub Issue Analyzer")
 st.markdown(
-    "Fetch closed issues from a GitHub repository, then classify and generate "
-    "actionable insights using AI agents. **Stage 1: Fetch & Explore.**"
+    "Fetch closed issues from a GitHub repository, classify them using AI, "
+    "and generate actionable insights for maintainers."
 )
 
 # --- Fetch flow ---
@@ -245,10 +245,186 @@ if "issues" in st.session_state:
         st.markdown("**Issues closed per month:**")
         render_monthly_distribution(issues)
 
-    # Placeholder for Stage 2
+    # -----------------------------------------------------------------
+    # Stage 2: Classification
+    # -----------------------------------------------------------------
     st.divider()
-    st.info(
-        "⏭️ **Next: Stage 2 — Classification.** "
-        "The Classifier Agent will categorize these issues by type, severity, "
-        "and affected component. Coming soon!"
-    )
+    st.subheader("🤖 AI Classification")
+
+    col_classify, col_status = st.columns([1, 2])
+
+    with col_classify:
+        classify_button = st.button(
+            "🧠 Classify Issues",
+            use_container_width=True,
+            help="Run the Classifier Agent to categorize all fetched issues",
+        )
+        reclassify = st.checkbox(
+            "Re-classify all (ignore previous results)",
+            value=False,
+        )
+
+    if classify_button:
+        from classifier_agent import classify_issues
+        from dynamo_utils import (
+            get_classified_issue_numbers,
+            delete_classifications,
+            ensure_tables_exist,
+        )
+
+        repo_slug = st.session_state["repo_slug"]
+        ensure_tables_exist()
+
+        if reclassify:
+            with st.spinner("Clearing previous classifications..."):
+                deleted = delete_classifications(repo_slug)
+                if deleted:
+                    st.toast(f"Cleared {deleted} previous classifications")
+            existing_numbers = set()
+        else:
+            existing_numbers = get_classified_issue_numbers(repo_slug)
+            if existing_numbers:
+                st.info(
+                    f"Found {len(existing_numbers)} already-classified issues. "
+                    f"Skipping those. Check 'Re-classify all' to redo them."
+                )
+
+        new_issues = [
+            i for i in issues if i["number"] not in existing_numbers
+        ]
+
+        if not new_issues:
+            st.success("All issues are already classified!")
+        else:
+            progress_bar = st.progress(0, text="Classifying issues...")
+            status_text = st.empty()
+
+            def on_classify_progress(done, total, batch_num):
+                pct = int((done / total) * 100)
+                progress_bar.progress(
+                    pct,
+                    text=f"Batch {batch_num} — {done}/{total} issues classified",
+                )
+                status_text.text(f"Processing batch {batch_num}...")
+
+            try:
+                results = classify_issues(
+                    issues=new_issues,
+                    repo_slug=repo_slug,
+                    progress_callback=on_classify_progress,
+                    skip_existing=False,
+                    existing_numbers=set(),
+                )
+                progress_bar.progress(100, text="Classification complete!")
+                status_text.empty()
+                st.session_state["classifications"] = results
+                st.success(
+                    f"Classified {len(results)} issues and saved to DynamoDB."
+                )
+            except Exception as e:
+                progress_bar.empty()
+                status_text.empty()
+                st.error(f"Classification failed: {e}")
+
+    # Load existing classifications if we don't have them yet
+    if "classifications" not in st.session_state and "repo_slug" in st.session_state:
+        try:
+            from dynamo_utils import get_classifications
+            existing = get_classifications(st.session_state["repo_slug"])
+            if existing:
+                st.session_state["classifications"] = existing
+        except Exception:
+            pass
+
+    # -----------------------------------------------------------------
+    # Classification Results
+    # -----------------------------------------------------------------
+    if "classifications" in st.session_state and st.session_state["classifications"]:
+        clfs = st.session_state["classifications"]
+
+        st.divider()
+        st.subheader(f"📊 Classification Results — {len(clfs)} issues")
+
+        # Summary metrics
+        cat_counts = {}
+        sev_counts = {}
+        comp_counts = {}
+        for c in clfs:
+            cat = c.get("category", "Other")
+            sev = c.get("severity", "Medium")
+            comp = c.get("affected_component", "unknown")
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            sev_counts[sev] = sev_counts.get(sev, 0) + 1
+            comp_counts[comp] = comp_counts.get(comp, 0) + 1
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Classified", len(clfs))
+        m2.metric("Categories Found", len(cat_counts))
+        m3.metric("Critical Issues", sev_counts.get("Critical", 0))
+        m4.metric("Components", len(comp_counts))
+
+        # Tabs for charts and table
+        tab_cats, tab_sev, tab_comp, tab_data = st.tabs(
+            ["📊 Categories", "⚠️ Severity", "🔥 Hotspots", "📋 All Data"]
+        )
+
+        with tab_cats:
+            st.markdown("**Issue distribution by category:**")
+            cat_df = pd.DataFrame(
+                sorted(cat_counts.items(), key=lambda x: x[1], reverse=True),
+                columns=["Category", "Count"],
+            ).set_index("Category")
+            st.bar_chart(cat_df)
+
+        with tab_sev:
+            st.markdown("**Issue distribution by severity:**")
+            sev_order = ["Critical", "High", "Medium", "Low", "Informational"]
+            sev_data = [(s, sev_counts.get(s, 0)) for s in sev_order if sev_counts.get(s, 0) > 0]
+            sev_df = pd.DataFrame(sev_data, columns=["Severity", "Count"]).set_index("Severity")
+            st.bar_chart(sev_df)
+
+        with tab_comp:
+            st.markdown("**Top affected components (hotspots):**")
+            top_comps = sorted(comp_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+            comp_df = pd.DataFrame(top_comps, columns=["Component", "Issues"])
+            st.dataframe(comp_df, use_container_width=True, hide_index=True)
+
+        with tab_data:
+            filter_cat = st.multiselect(
+                "Filter by category",
+                options=sorted(cat_counts.keys()),
+                default=None,
+            )
+            filter_sev = st.multiselect(
+                "Filter by severity",
+                options=[s for s in sev_order if s in sev_counts],
+                default=None,
+            )
+
+            filtered = clfs
+            if filter_cat:
+                filtered = [c for c in filtered if c.get("category") in filter_cat]
+            if filter_sev:
+                filtered = [c for c in filtered if c.get("severity") in filter_sev]
+
+            rows = []
+            for c in filtered:
+                rows.append({
+                    "#": c.get("issue_number", ""),
+                    "Title": c.get("title", ""),
+                    "Category": c.get("category", ""),
+                    "Subcategory": c.get("subcategory", ""),
+                    "Severity": c.get("severity", ""),
+                    "Component": c.get("affected_component", ""),
+                    "Summary": c.get("summary", ""),
+                })
+            clf_df = pd.DataFrame(rows)
+            st.dataframe(clf_df, use_container_width=True, hide_index=True)
+
+        # Placeholder for Stage 3
+        st.divider()
+        st.info(
+            "⏭️ **Next: Stage 3 — Recommendations.** "
+            "The Recommender Agent will analyze these classifications to generate "
+            "actionable insights, trends, and prioritized action items."
+        )
