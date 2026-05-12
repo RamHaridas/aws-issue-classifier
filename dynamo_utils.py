@@ -4,6 +4,7 @@ DynamoDB utilities for storing and retrieving classification and recommendation 
 
 import boto3
 from botocore.exceptions import ClientError
+from datetime import datetime, timezone
 from config import (
     AWS_REGION,
     DYNAMO_TABLE_CLASSIFICATIONS,
@@ -135,6 +136,37 @@ def get_classified_issue_numbers(repo_slug: str) -> set[int]:
             numbers.add(int(item["issue_number"]))
 
     return numbers
+
+
+def save_recommendations(repo_slug: str, insights: dict):
+    """Save recommendation results to DynamoDB."""
+    table = get_dynamodb_resource().Table(DYNAMO_TABLE_RECOMMENDATIONS)
+    run_id = datetime.now(timezone.utc).isoformat()
+
+    # DynamoDB can't store float('inf') or empty sets, so sanitize
+    item = {
+        "repo_slug": repo_slug,
+        "run_id": run_id,
+    }
+    for key, value in insights.items():
+        if value is not None and value != "":
+            item[key] = value
+
+    table.put_item(Item=item)
+    return run_id
+
+
+def get_latest_recommendation(repo_slug: str) -> dict | None:
+    """Get the most recent recommendation run for a repo."""
+    table = get_dynamodb_resource().Table(DYNAMO_TABLE_RECOMMENDATIONS)
+
+    response = table.query(
+        KeyConditionExpression=boto3.dynamodb.conditions.Key("repo_slug").eq(repo_slug),
+        ScanIndexForward=False,  # Descending order by sort key
+        Limit=1,
+    )
+    items = response.get("Items", [])
+    return items[0] if items else None
 
 
 def delete_classifications(repo_slug: str):

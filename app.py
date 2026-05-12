@@ -421,10 +421,103 @@ if "issues" in st.session_state:
             clf_df = pd.DataFrame(rows)
             st.dataframe(clf_df, use_container_width=True, hide_index=True)
 
-        # Placeholder for Stage 3
+        # -----------------------------------------------------------------
+        # Stage 3: Recommendations
+        # -----------------------------------------------------------------
         st.divider()
-        st.info(
-            "⏭️ **Next: Stage 3 — Recommendations.** "
-            "The Recommender Agent will analyze these classifications to generate "
-            "actionable insights, trends, and prioritized action items."
-        )
+        st.subheader("💡 AI-Powered Insights")
+
+        col_reco, col_reco_status = st.columns([1, 2])
+        with col_reco:
+            recommend_button = st.button(
+                "💡 Generate Insights",
+                use_container_width=True,
+                help="Run the Recommender Agent to analyze classifications and produce actionable insights",
+            )
+
+        if recommend_button:
+            from recommender_agent import generate_recommendations
+
+            repo_slug = st.session_state["repo_slug"]
+            token = st.session_state.get("github_token")
+
+            with st.spinner("Recommender Agent is analyzing your data... This may take a minute."):
+                try:
+                    insights = generate_recommendations(repo_slug, github_token=token)
+                    st.session_state["insights"] = insights
+                    st.success("Insights generated and saved to DynamoDB!")
+                except Exception as e:
+                    st.error(f"Recommendation failed: {e}")
+
+        # Load existing insights if not in session
+        if "insights" not in st.session_state and "repo_slug" in st.session_state:
+            try:
+                from dynamo_utils import get_latest_recommendation
+                existing = get_latest_recommendation(st.session_state["repo_slug"])
+                if existing:
+                    st.session_state["insights"] = existing
+            except Exception:
+                pass
+
+        # -----------------------------------------------------------------
+        # Insights Dashboard
+        # -----------------------------------------------------------------
+        if "insights" in st.session_state and st.session_state["insights"]:
+            from dashboard import (
+                render_executive_summary,
+                render_category_pie,
+                render_severity_bar,
+                render_hotspot_table,
+                render_trend_chart,
+                render_action_items,
+                render_security_assessment,
+                render_documentation_gaps,
+                render_quick_wins,
+                render_narrative,
+            )
+
+            insights = st.session_state["insights"]
+
+            st.divider()
+            st.subheader("📈 Repository Health Dashboard")
+
+            # Executive summary
+            render_executive_summary(insights)
+
+            # Row 1: Category + Severity charts
+            left, right = st.columns(2)
+            with left:
+                render_category_pie(insights)
+            with right:
+                render_severity_bar(insights)
+
+            # Row 2: Hotspots + Trends
+            left2, right2 = st.columns(2)
+            with left2:
+                st.markdown("#### 🔥 Hotspot Components")
+                render_hotspot_table(insights)
+            with right2:
+                st.markdown("#### 📈 Issue Trends Over Time")
+                render_trend_chart(insights)
+
+            # Action items
+            st.divider()
+            st.markdown("#### 🎯 Prioritized Action Items")
+            render_action_items(insights)
+
+            # Quick wins
+            st.divider()
+            st.markdown("#### ⚡ Quick Wins")
+            render_quick_wins(insights)
+
+            # Detail tabs
+            st.divider()
+            detail_tab1, detail_tab2, detail_tab3 = st.tabs(
+                ["🔒 Security Assessment", "📝 Documentation Gaps", "📄 Full Analysis"]
+            )
+            with detail_tab1:
+                render_security_assessment(insights)
+            with detail_tab2:
+                render_documentation_gaps(insights)
+            with detail_tab3:
+                render_narrative(insights)
