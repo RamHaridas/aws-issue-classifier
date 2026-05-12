@@ -138,25 +138,6 @@ def get_repository_structure(repo_owner: str, repo_name: str, github_token: str 
         return json.dumps({"error": f"Could not fetch repo structure: {str(e)}"})
 
 
-@tool
-def save_analysis_results(repo_slug: str, insights_json: str) -> str:
-    """Save the generated recommendation results to DynamoDB.
-
-    Args:
-        repo_slug: Repository identifier in owner/repo format
-        insights_json: JSON string containing all generated insights
-
-    Returns:
-        Confirmation message
-    """
-    try:
-        insights = json.loads(insights_json)
-        save_recommendations(repo_slug, insights)
-        return f"Successfully saved recommendations for {repo_slug}"
-    except Exception as e:
-        return f"Failed to save recommendations: {str(e)}"
-
-
 # ---------------------------------------------------------------------------
 # Recommender Agent
 # ---------------------------------------------------------------------------
@@ -168,30 +149,27 @@ You analyze classified GitHub issue data to generate actionable insights for rep
 You have these tools:
 1. read_classification_data - Fetches all classified issues and aggregate statistics from DynamoDB
 2. get_repository_structure - Fetches the repo file tree to map affected components to real code
-3. save_analysis_results - Saves your analysis to DynamoDB
 
 When asked to analyze a repository, follow these steps:
 1. Call read_classification_data to get the classified issues and statistics
 2. Optionally call get_repository_structure to understand the codebase layout
-3. Analyze the data and produce a comprehensive JSON report
-4. Call save_analysis_results to persist your analysis
+3. Analyze the data and respond with ONLY a JSON object — no other text before or after it
 
-Your analysis MUST be returned as a JSON object with these exact keys:
+Your response MUST be a single JSON object (no markdown fences, no extra text) with these exact keys:
 - executive_summary: 2-3 sentence overview of the repo's issue landscape
 - category_distribution: dict of category -> count (from the data)
 - severity_distribution: dict of severity -> count (from the data)
-- hotspots: list of top 10 components with issue counts and why they're problematic
-- trend_analysis: description of how issue patterns change over time
-- action_items: list of 5-8 prioritized recommendations, each with title, description, priority (1-5), effort (Low/Medium/High), and impact (Low/Medium/High)
-- security_assessment: risk_level (Low/Medium/High/Critical), summary, and list of concerns
-- documentation_gaps: list of areas where better documentation would reduce issues
-- quick_wins: list of 3-5 low-effort high-impact improvements
+- hotspots: list of top 10 objects, each with "component", "issue_count", and "reason"
+- trend_analysis: description of how issue patterns change over time (string)
+- action_items: list of 5-8 objects, each with "title", "description", "priority" (1-5), "effort" (Low/Medium/High), "impact" (Low/Medium/High)
+- security_assessment: object with "risk_level" (Low/Medium/High/Critical), "summary", and "concerns" (list of strings)
+- documentation_gaps: list of strings describing areas where better docs would reduce issues
+- quick_wins: list of 3-5 objects, each with "title", "description", "impact"
 - raw_narrative: a detailed multi-paragraph analysis in plain English
 
 Be specific and data-driven. Reference actual component names, issue counts, and percentages.
 Do NOT be generic. Every insight should reference concrete data from the classification results.
-
-After generating the JSON, call save_analysis_results with it, then provide a brief summary to the user."""
+Do NOT wrap your response in markdown code fences. Output raw JSON only."""
 
 
 def generate_recommendations(repo_slug: str, github_token: str | None = None) -> dict:
@@ -212,7 +190,7 @@ def generate_recommendations(repo_slug: str, github_token: str | None = None) ->
 
     agent = Agent(
         model=model,
-        tools=[read_classification_data, get_repository_structure, save_analysis_results],
+        tools=[read_classification_data, get_repository_structure],
         system_prompt=RECOMMENDER_SYSTEM_PROMPT,
     )
 
@@ -225,21 +203,34 @@ def generate_recommendations(repo_slug: str, github_token: str | None = None) ->
         f"Analyze the classified issues for repository '{repo_slug}'. "
         f"The owner is '{owner}' and the repo name is '{repo}'.{token_instruction} "
         f"Read the classification data, optionally fetch the repo structure, "
-        f"generate a comprehensive analysis, and save the results. "
-        f"Return your complete analysis as JSON."
+        f"and return your complete analysis as a JSON object."
     )
 
     response = agent(prompt)
-    response_text = response.message["content"][0]["text"]
+
+    # Extract text from all content blocks
+    response_text = ""
+    for block in response.message.get("content", []):
+        if isinstance(block, dict) and block.get("text"):
+            response_text += block["text"]
 
     # Try to extract JSON from the response
+    insights = None
     try:
         start = response_text.find("{")
         end = response_text.rfind("}")
         if start != -1 and end != -1:
-            return json.loads(response_text[start:end + 1])
+            insights = json.loads(response_text[start:end + 1])
     except (json.JSONDecodeError, ValueError):
         pass
 
-    # If JSON extraction fails, return the raw text as a narrative
-    return {"raw_narrative": response_text}
+    if not insights:
+        insights = {"raw_narrative": response_text}
+
+    # Save to DynamoDB programmatically (not via agent tool)
+    try:
+        save_recommendations(repo_slug, insights)
+    except Exception:
+        pass  # Non-fatal — insights are still returned to the UI
+
+    return insights
