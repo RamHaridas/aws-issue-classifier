@@ -46,6 +46,9 @@ from config import (
     COGNITO_DISCOVERY_URL_SSM_PARAM,
     COGNITO_USERNAME,
     COGNITO_PASSWORD,
+    RUNTIME_ROLE_NAME,
+    RUNTIME_ROLE_ARN_SSM_PARAM,
+    RUNTIME_AGENT_NAME,
 )
 from dynamo_utils import ensure_tables_exist
 
@@ -574,15 +577,202 @@ def setup_gateway_target(gateway_id: str, lambda_arn: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Step 10: AgentCore Runtime Execution IAM Role
+# ---------------------------------------------------------------------------
+
+RUNTIME_POLICY_NAME = "IssueAnalyzerRuntimePolicy"
+
+
+def setup_runtime_role() -> str:
+    """Create the Runtime execution IAM role with full permissions.
+
+    Follows the workshop's create_agentcore_runtime_execution_role pattern
+    with trust policy for bedrock-agentcore.amazonaws.com and all required
+    permission statements for ECR, CloudWatch, X-Ray, Bedrock, Memory,
+    SSM, and Gateway access.
+    """
+    account_id = get_account_id()
+    region = AWS_REGION
+    iam = boto3.client("iam", region_name=region)
+
+    trust_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "AssumeRolePolicy",
+                "Effect": "Allow",
+                "Principal": {"Service": "bedrock-agentcore.amazonaws.com"},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id},
+                    "ArnLike": {
+                        "aws:SourceArn": f"arn:aws:bedrock-agentcore:{region}:{account_id}:*"
+                    },
+                },
+            }
+        ],
+    }
+
+    policy_document = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "ECRImageAccess",
+                "Effect": "Allow",
+                "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+                "Resource": [f"arn:aws:ecr:{region}:{account_id}:repository/*"],
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["logs:DescribeLogStreams", "logs:CreateLogGroup"],
+                "Resource": [
+                    f"arn:aws:logs:{region}:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/*"
+                ],
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["logs:DescribeLogGroups"],
+                "Resource": [f"arn:aws:logs:{region}:{account_id}:log-group:*"],
+            },
+            {
+                "Effect": "Allow",
+                "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                "Resource": [
+                    f"arn:aws:logs:{region}:{account_id}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"
+                ],
+            },
+            {
+                "Sid": "ECRTokenAccess",
+                "Effect": "Allow",
+                "Action": ["ecr:GetAuthorizationToken"],
+                "Resource": "*",
+            },
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "xray:PutTraceSegments",
+                    "xray:PutTelemetryRecords",
+                    "xray:GetSamplingRules",
+                    "xray:GetSamplingTargets",
+                ],
+                "Resource": ["*"],
+            },
+            {
+                "Effect": "Allow",
+                "Resource": "*",
+                "Action": "cloudwatch:PutMetricData",
+                "Condition": {
+                    "StringEquals": {"cloudwatch:namespace": "bedrock-agentcore"}
+                },
+            },
+            {
+                "Sid": "GetAgentAccessToken",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:GetWorkloadAccessToken",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+                    "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
+                ],
+                "Resource": [
+                    f"arn:aws:bedrock-agentcore:{region}:{account_id}:workload-identity-directory/default",
+                    f"arn:aws:bedrock-agentcore:{region}:{account_id}:workload-identity-directory/default/workload-identity/{RUNTIME_AGENT_NAME}-*",
+                ],
+            },
+            {
+                "Sid": "BedrockModelInvocation",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                    "bedrock:ApplyGuardrail",
+                    "bedrock:Retrieve",
+                ],
+                "Resource": [
+                    "arn:aws:bedrock:*::foundation-model/*",
+                    f"arn:aws:bedrock:{region}:{account_id}:*",
+                ],
+            },
+            {
+                "Sid": "AllowAgentToUseMemory",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:CreateEvent",
+                    "bedrock-agentcore:ListEvents",
+                    "bedrock-agentcore:GetMemoryRecord",
+                    "bedrock-agentcore:GetMemory",
+                    "bedrock-agentcore:RetrieveMemoryRecords",
+                    "bedrock-agentcore:ListMemoryRecords",
+                ],
+                "Resource": [f"arn:aws:bedrock-agentcore:{region}:{account_id}:*"],
+            },
+            {
+                "Sid": "GetSSMParameters",
+                "Effect": "Allow",
+                "Action": ["ssm:GetParameter"],
+                "Resource": [f"arn:aws:ssm:{region}:{account_id}:parameter/*"],
+            },
+            {
+                "Sid": "GatewayAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:GetGateway",
+                    "bedrock-agentcore:InvokeGateway",
+                ],
+                "Resource": [
+                    f"arn:aws:bedrock-agentcore:{region}:{account_id}:gateway/*"
+                ],
+            },
+        ],
+    }
+
+    # Create role
+    try:
+        response = iam.create_role(
+            RoleName=RUNTIME_ROLE_NAME,
+            AssumeRolePolicyDocument=json.dumps(trust_policy),
+            Description="IAM role for IssueAnalyzer AgentCore Runtime",
+        )
+        role_arn = response["Role"]["Arn"]
+        print(f"  Created IAM role: {RUNTIME_ROLE_NAME}")
+    except iam.exceptions.EntityAlreadyExistsException:
+        response = iam.get_role(RoleName=RUNTIME_ROLE_NAME)
+        role_arn = response["Role"]["Arn"]
+        print(f"  IAM role already exists: {RUNTIME_ROLE_NAME}")
+
+    # Create and attach the inline policy
+    policy_arn_str = None
+    try:
+        policy_response = iam.create_policy(
+            PolicyName=RUNTIME_POLICY_NAME,
+            PolicyDocument=json.dumps(policy_document),
+            Description="Policy for IssueAnalyzer AgentCore Runtime permissions",
+        )
+        policy_arn_str = policy_response["Policy"]["Arn"]
+        print(f"  Created policy: {RUNTIME_POLICY_NAME}")
+    except iam.exceptions.EntityAlreadyExistsException:
+        policy_arn_str = f"arn:aws:iam::{account_id}:policy/{RUNTIME_POLICY_NAME}"
+        print(f"  Policy already exists: {RUNTIME_POLICY_NAME}")
+
+    try:
+        iam.attach_role_policy(RoleName=RUNTIME_ROLE_NAME, PolicyArn=policy_arn_str)
+        print(f"  Attached {RUNTIME_POLICY_NAME} to {RUNTIME_ROLE_NAME}")
+    except Exception:
+        print(f"  Policy already attached or could not attach")
+
+    put_ssm_parameter(RUNTIME_ROLE_ARN_SSM_PARAM, role_arn)
+    return role_arn
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main():
     print("=" * 60)
-    print("GitHub Issue Analyzer — AWS Setup (Stage 5)")
+    print("GitHub Issue Analyzer — AWS Setup (Stage 6)")
     print("=" * 60)
 
-    total_steps = 9
+    total_steps = 10
 
     # Step 1: IAM permissions for execution role
     print(f"\n[1/{total_steps}] Checking IAM permissions...")
@@ -633,7 +823,9 @@ def main():
     if not cognito_config:
         print("  Cognito setup failed. Gateway will not be available.")
         print("  The Recommender Agent will fall back to local tools.")
-        _print_summary(memory_id, lambda_arn, None, None)
+        print(f"\n[10/{total_steps}] Creating Runtime execution IAM role...")
+        runtime_role_arn = setup_runtime_role()
+        _print_summary(memory_id, lambda_arn, None, None, runtime_role_arn)
         return
 
     # Step 8: AgentCore Gateway
@@ -641,17 +833,23 @@ def main():
     gateway = setup_gateway(cognito_config, gateway_role_arn)
     if not gateway:
         print("  Gateway creation failed. The Recommender Agent will fall back to local tools.")
-        _print_summary(memory_id, lambda_arn, None, None)
+        print(f"\n[10/{total_steps}] Creating Runtime execution IAM role...")
+        runtime_role_arn = setup_runtime_role()
+        _print_summary(memory_id, lambda_arn, None, None, runtime_role_arn)
         return
 
     # Step 9: Gateway Target
     print(f"\n[9/{total_steps}] Creating Gateway Target...")
     target_id = setup_gateway_target(gateway["id"], lambda_arn)
 
-    _print_summary(memory_id, lambda_arn, gateway, target_id)
+    # Step 10: Runtime Execution IAM Role
+    print(f"\n[10/{total_steps}] Creating Runtime execution IAM role...")
+    runtime_role_arn = setup_runtime_role()
+
+    _print_summary(memory_id, lambda_arn, gateway, target_id, runtime_role_arn)
 
 
-def _print_summary(memory_id, lambda_arn, gateway, target_id):
+def _print_summary(memory_id, lambda_arn, gateway, target_id, runtime_role_arn=None):
     print("\n" + "=" * 60)
     print("Setup Summary:")
     print(f"  Memory ID:        {memory_id or 'skipped'}")
@@ -662,8 +860,10 @@ def _print_summary(memory_id, lambda_arn, gateway, target_id):
         print(f"  Target ID:        {target_id or 'failed'}")
     else:
         print("  Gateway:          not configured")
+    print(f"  Runtime Role ARN: {runtime_role_arn or 'skipped'}")
     print("=" * 60)
     print("You can now run: streamlit run app.py")
+    print("Or deploy to Runtime via the notebook cells.")
     print("=" * 60)
 
 

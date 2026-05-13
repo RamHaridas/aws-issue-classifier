@@ -79,3 +79,9 @@ COGNITO_CLIENT_SECRET_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/cognito_client_secret"
 COGNITO_DISCOVERY_URL_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/cognito_discovery_url"
 COGNITO_USERNAME = "agent_user"
 COGNITO_PASSWORD = "AgentPass123!"
+
+# --- AgentCore Runtime ---
+RUNTIME_AGENT_NAME = "issue_analyzer_recommender"
+RUNTIME_ROLE_NAME = "IssueAnalyzerRuntimeRole"
+RUNTIME_ROLE_ARN_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/runtime_execution_role_arn"
+RUNTIME_ARN_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/runtime_arn"
