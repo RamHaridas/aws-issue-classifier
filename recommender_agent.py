@@ -245,6 +245,9 @@ def _get_gateway_url() -> str | None:
 RECOMMENDER_SYSTEM_PROMPT = """You are an expert software engineering analyst specializing in open source project health.
 
 You analyze classified GitHub issue data to generate actionable insights for repository maintainers.
+Each classified issue has an issue_type (Defect, Support, Enhancement, Documentation, Task) and a
+category. When analyzing patterns, consider both dimensions — for example, a cluster of
+Support + Installation/Configuration issues suggests the setup experience needs improvement.
 
 You have these tools:
 1. read_classification_data - Fetches all classified issues and aggregate statistics from DynamoDB

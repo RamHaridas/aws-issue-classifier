@@ -80,6 +80,7 @@ def save_classifications(repo_slug: str, classifications: list[dict]):
                 "body_snippet": item.get("body_snippet", ""),
                 "url": item.get("url", ""),
                 "original_labels": item.get("original_labels", []),
+                "issue_type": item.get("issue_type", "Support"),
                 "category": item.get("category", "Other"),
                 "subcategory": item.get("subcategory", ""),
                 "severity": item.get("severity", "Medium"),
