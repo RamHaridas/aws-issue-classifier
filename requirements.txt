@@ -3,8 +3,7 @@ requests
 pandas
 boto3>=1.42.3
 strands-agents
-strands-agents-tools-mcp
-mcp
+strands-agents-tools
 plotly
 bedrock-agentcore==1.1.1
 bedrock-agentcore-starter-toolkit==0.2.3

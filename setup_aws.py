@@ -218,7 +218,7 @@ def setup_gateway_role() -> str:
     """Create the Gateway IAM role with Lambda invoke permissions."""
     role_arn = _create_iam_role(
         role_name=GATEWAY_ROLE_NAME,
-        trust_service="agentcore.amazonaws.com",
+        trust_service="bedrock-agentcore.amazonaws.com",
         description="IAM role for IssueAnalyzer AgentCore Gateway",
     )
 
