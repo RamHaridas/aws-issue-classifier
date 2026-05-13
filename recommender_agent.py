@@ -4,9 +4,13 @@ issues and generate actionable insights for repository maintainers.
 
 Reads classification data from DynamoDB, optionally fetches repo structure
 from GitHub, and produces structured insights via LLM reasoning.
+
+Integrates with AgentCore Memory for cross-session pattern learning.
 """
 
 import json
+import uuid
+import logging
 from datetime import datetime, timezone
 from collections import Counter
 
@@ -14,9 +18,15 @@ from strands import Agent
 from strands.models import BedrockModel
 from strands.tools import tool
 
-from config import BEDROCK_MODEL_ID, AWS_REGION
+from config import (
+    BEDROCK_MODEL_ID,
+    AWS_REGION,
+    MEMORY_SSM_PARAM,
+)
 from dynamo_utils import get_classifications, save_recommendations
 from github_fetcher import fetch_repo_structure
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -37,12 +47,9 @@ def read_classification_data(repo_slug: str) -> str:
     if not items:
         return json.dumps({"error": "No classification data found for this repository."})
 
-    # Pre-compute aggregates so the LLM has easy access to summaries
     cat_counts = Counter(item.get("category", "Other") for item in items)
     sev_counts = Counter(item.get("severity", "Medium") for item in items)
-    comp_counts = Counter(item.get("affected_component", "unknown") for item in items)
 
-    # Monthly trend
     monthly = {}
     for item in items:
         closed = item.get("closed_at", "")
@@ -59,7 +66,6 @@ def read_classification_data(repo_slug: str) -> str:
         entry.update(dict(monthly[month]))
         trend_data.append(entry)
 
-    # Top hotspots with severity breakdown
     hotspots = []
     comp_items = {}
     for item in items:
@@ -78,7 +84,6 @@ def read_classification_data(repo_slug: str) -> str:
             "top_categories": [{"category": c, "count": n} for c, n in top_cats],
         })
 
-    # Security-specific items
     security_issues = [i for i in items if i.get("category") == "Security"]
 
     payload = {
@@ -123,7 +128,6 @@ def get_repository_structure(repo_owner: str, repo_name: str, github_token: str 
     try:
         token = github_token if github_token else None
         files = fetch_repo_structure(repo_owner, repo_name, token=token)
-        # Group by top-level directory for easier analysis
         dir_counts = Counter()
         for f in files:
             top_dir = f.split("/")[0] if "/" in f else "(root)"
@@ -132,10 +136,50 @@ def get_repository_structure(repo_owner: str, repo_name: str, github_token: str 
         return json.dumps({
             "total_files": len(files),
             "directory_summary": dict(dir_counts.most_common(20)),
-            "all_paths": files[:500],  # Cap to avoid context overflow
+            "all_paths": files[:500],
         })
     except Exception as e:
         return json.dumps({"error": f"Could not fetch repo structure: {str(e)}"})
+
+
+# ---------------------------------------------------------------------------
+# Memory integration helpers
+# ---------------------------------------------------------------------------
+
+def _get_memory_id() -> str | None:
+    """Retrieve the memory_id from SSM Parameter Store."""
+    import boto3
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        response = ssm.get_parameter(Name=MEMORY_SSM_PARAM, WithDecryption=True)
+        return response["Parameter"]["Value"]
+    except Exception:
+        return None
+
+
+def _build_memory_session_manager(memory_id: str, session_id: str, actor_id: str):
+    """Create an AgentCoreMemorySessionManager for the Recommender Agent."""
+    from bedrock_agentcore.memory.integrations.strands.config import (
+        AgentCoreMemoryConfig,
+        RetrievalConfig,
+    )
+    from bedrock_agentcore.memory.integrations.strands.session_manager import (
+        AgentCoreMemorySessionManager,
+    )
+
+    memory_config = AgentCoreMemoryConfig(
+        memory_id=memory_id,
+        session_id=session_id,
+        actor_id=actor_id,
+        retrieval_config={
+            "analysis/{actorId}/patterns/": RetrievalConfig(
+                top_k=5,
+                relevance_score=0.2,
+            ),
+        },
+    )
+
+    return AgentCoreMemorySessionManager(memory_config, AWS_REGION)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +193,10 @@ You analyze classified GitHub issue data to generate actionable insights for rep
 You have these tools:
 1. read_classification_data - Fetches all classified issues and aggregate statistics from DynamoDB
 2. get_repository_structure - Fetches the repo file tree to map affected components to real code
+
+You may also have access to memories from previous analyses of other repositories.
+If prior context is provided, use it to make comparative observations (e.g., "compared to similar
+logging frameworks, this repository has an unusually high rate of networking issues").
 
 When asked to analyze a repository, follow these steps:
 1. Call read_classification_data to get the classified issues and statistics
@@ -172,27 +220,56 @@ Do NOT be generic. Every insight should reference concrete data from the classif
 Do NOT wrap your response in markdown code fences. Output raw JSON only."""
 
 
-def generate_recommendations(repo_slug: str, github_token: str | None = None) -> dict:
+def generate_recommendations(
+    repo_slug: str,
+    github_token: str | None = None,
+    session_id: str | None = None,
+    actor_id: str = "analyzer_user",
+) -> dict:
     """Run the Recommender Agent to analyze classifications and generate insights.
 
     Args:
         repo_slug: "owner/repo" string
         github_token: Optional GitHub token for fetching repo structure
+        session_id: Session identifier for memory tracking
+        actor_id: Actor identifier for memory namespacing
 
     Returns:
-        Dict of insights (also saved to DynamoDB by the agent)
+        Dict of insights (also saved to DynamoDB)
     """
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
     model = BedrockModel(
         model_id=BEDROCK_MODEL_ID,
         temperature=0.3,
         region_name=AWS_REGION,
     )
 
-    agent = Agent(
-        model=model,
-        tools=[read_classification_data, get_repository_structure],
-        system_prompt=RECOMMENDER_SYSTEM_PROMPT,
-    )
+    # Try to set up AgentCore Memory
+    session_manager = None
+    memory_id = _get_memory_id()
+    if memory_id:
+        try:
+            session_manager = _build_memory_session_manager(
+                memory_id=memory_id,
+                session_id=session_id,
+                actor_id=actor_id,
+            )
+            logger.info(f"AgentCore Memory enabled (memory_id={memory_id})")
+        except Exception as e:
+            logger.warning(f"Could not initialize memory session manager: {e}")
+            session_manager = None
+
+    agent_kwargs = {
+        "model": model,
+        "tools": [read_classification_data, get_repository_structure],
+        "system_prompt": RECOMMENDER_SYSTEM_PROMPT,
+    }
+    if session_manager:
+        agent_kwargs["session_manager"] = session_manager
+
+    agent = Agent(**agent_kwargs)
 
     owner, repo = repo_slug.split("/")
     token_instruction = ""
@@ -227,10 +304,10 @@ def generate_recommendations(repo_slug: str, github_token: str | None = None) ->
     if not insights:
         insights = {"raw_narrative": response_text}
 
-    # Save to DynamoDB programmatically (not via agent tool)
+    # Save to DynamoDB programmatically
     try:
         save_recommendations(repo_slug, insights)
     except Exception:
-        pass  # Non-fatal — insights are still returned to the UI
+        pass
 
     return insights

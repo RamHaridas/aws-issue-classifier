@@ -52,3 +52,8 @@ AWS_REGION = "us-west-2"
 
 # --- Classifier ---
 CLASSIFICATION_BATCH_SIZE = 15
+
+# --- AgentCore Memory ---
+MEMORY_NAME = "IssueAnalyzerMemory"
+MEMORY_SSM_PARAM = "/app/issueanalyzer/agentcore/memory_id"
+MEMORY_EVENT_EXPIRY_DAYS = 90
