@@ -15,12 +15,20 @@ from strands.models import BedrockModel
 
 from config import (
     CATEGORIES,
+    ISSUE_TYPES,
     SEVERITIES,
     CLASSIFICATION_BATCH_SIZE,
     BEDROCK_MODEL_ID,
     AWS_REGION,
 )
 from dynamo_utils import save_classifications, ensure_tables_exist
+
+
+def _format_taxonomy(taxonomy):
+    """Format a taxonomy dict or list for inclusion in the system prompt."""
+    if isinstance(taxonomy, dict):
+        return "\n".join(f'- "{k}": {v}' for k, v in taxonomy.items())
+    return json.dumps(taxonomy)
 
 
 CLASSIFIER_SYSTEM_PROMPT = f"""You are an expert software issue classifier for open source repositories.
@@ -30,14 +38,18 @@ Do NOT include any text before or after the JSON. Do NOT use markdown code fence
 
 For each issue, provide:
 - issue_number: the issue number (integer)
-- category: one of {json.dumps(CATEGORIES)}
+- issue_type: one of the following issue types:
+{_format_taxonomy(ISSUE_TYPES)}
+- category: one of {_format_taxonomy(CATEGORIES)}
 - subcategory: a 2-4 word refinement within the category
 - severity: one of {json.dumps(SEVERITIES)}
 - affected_component: the module, file, or subsystem affected (be specific, use the issue context)
 - summary: one-sentence summary of the core problem
 
-Rules:
+Classification rules:
+- Pick EXACTLY ONE issue_type per issue. Do NOT assign multiple types. If genuinely none of the five apply, pick the closest one and explain in summary.
 - Pick the single best-fit category. If unsure, use "Other".
+- When issue_type="Documentation", category should describe the FUNCTIONAL AREA being documented (e.g. category="Networking" for missing docs about networking, category="Security" for missing docs about auth setup). Use category="Documentation" only when the documentation subsystem itself is broken \u2014 for example, the docs build pipeline fails, the docs site is down, or the API reference generator crashes (in those cases issue_type would typically be "Defect" or "Task", not "Documentation").
 - Infer severity from impact described: crashes/data loss = Critical, major breakage = High,
   partial breakage with workaround = Medium, minor/cosmetic = Low, questions/discussions = Informational.
 - For affected_component, extract from the issue title/body. If unclear, use "general".
@@ -45,8 +57,10 @@ Rules:
 
 Respond with ONLY the JSON array. Example format:
 [
-  {{"issue_number": 123, "category": "Bug", "subcategory": "crash on startup", "severity": "Critical", "affected_component": "server/core", "summary": "Server crashes on startup with null config"}},
-  {{"issue_number": 456, "category": "Documentation", "subcategory": "missing API docs", "severity": "Low", "affected_component": "docs/api", "summary": "REST API endpoints lack usage examples"}}
+  {{"issue_number": 101, "issue_type": "Defect", "category": "Reliability", "subcategory": "null pointer crash", "severity": "Critical", "affected_component": "server/core", "summary": "Server crashes on startup when config file is missing"}},
+  {{"issue_number": 202, "issue_type": "Support", "category": "Installation/Configuration", "subcategory": "pip install help", "severity": "Informational", "affected_component": "setup.py", "summary": "User cannot install package on Python 3.12 and needs guidance"}},
+  {{"issue_number": 303, "issue_type": "Documentation", "category": "Networking", "subcategory": "missing TLS docs", "severity": "Low", "affected_component": "docs/networking", "summary": "TLS configuration guide is missing from the networking documentation"}},
+  {{"issue_number": 404, "issue_type": "Task", "category": "Build/CI", "subcategory": "CI image update", "severity": "Low", "affected_component": ".github/workflows", "summary": "Bump CI image to Ubuntu 24.04, no behavior change"}}
 ]"""
 
 
@@ -165,10 +179,10 @@ def classify_issues(
             classifications = classify_batch(batch)
         except Exception as e:
             print(f"Batch {batch_num} classification failed: {e}")
-            # On failure, assign "Other" to the batch so we don't lose them
             classifications = [
                 {
                     "issue_number": issue["number"],
+                    "issue_type": "Support",
                     "category": "Other",
                     "subcategory": "classification failed",
                     "severity": "Informational",
