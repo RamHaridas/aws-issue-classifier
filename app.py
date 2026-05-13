@@ -6,6 +6,7 @@ Usage:
     streamlit run app.py
 """
 
+import uuid
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timezone
@@ -436,14 +437,22 @@ if "issues" in st.session_state:
             )
 
         if recommend_button:
-            from recommender_agent import generate_recommendations
-
             repo_slug = st.session_state["repo_slug"]
             token = st.session_state.get("github_token")
 
-            with st.spinner("Recommender Agent is analyzing your data... This may take a minute."):
+            if "memory_session_id" not in st.session_state:
+                st.session_state["memory_session_id"] = str(uuid.uuid4())
+
+            from recommender_agent import generate_recommendations
+
+            with st.spinner("Recommender Agent is analyzing your data (with memory)... This may take a minute."):
                 try:
-                    insights = generate_recommendations(repo_slug, github_token=token)
+                    insights = generate_recommendations(
+                        repo_slug,
+                        github_token=token,
+                        session_id=st.session_state["memory_session_id"],
+                        actor_id="streamlit_user",
+                    )
                     st.session_state["insights"] = insights
                     st.success("Insights generated and saved to DynamoDB!")
                 except Exception as e:

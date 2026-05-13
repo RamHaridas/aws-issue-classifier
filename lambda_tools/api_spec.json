@@ -1,0 +1,43 @@
+[
+    {
+        "name": "read_classification_data",
+        "description": "Read all classified GitHub issues for a repository from DynamoDB, including aggregate statistics such as category distribution, severity breakdown, hotspots, and trend data.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_slug": {
+                    "type": "string",
+                    "description": "Repository identifier in owner/repo format (e.g. 'pallets/flask')"
+                }
+            },
+            "required": [
+                "repo_slug"
+            ]
+        }
+    },
+    {
+        "name": "get_repository_structure",
+        "description": "Fetch the file tree of a GitHub repository to map components to actual code locations.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_owner": {
+                    "type": "string",
+                    "description": "GitHub repository owner (e.g. 'pallets')"
+                },
+                "repo_name": {
+                    "type": "string",
+                    "description": "GitHub repository name (e.g. 'flask')"
+                },
+                "github_token": {
+                    "type": "string",
+                    "description": "Optional GitHub personal access token for higher rate limits"
+                }
+            },
+            "required": [
+                "repo_owner",
+                "repo_name"
+            ]
+        }
+    }
+]

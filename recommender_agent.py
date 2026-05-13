@@ -4,23 +4,45 @@ issues and generate actionable insights for repository maintainers.
 
 Reads classification data from DynamoDB, optionally fetches repo structure
 from GitHub, and produces structured insights via LLM reasoning.
+
+Integrates with AgentCore Memory for cross-session pattern learning.
+Integrates with AgentCore Gateway for centralized MCP-based tool access.
 """
 
 import json
+import uuid
+import logging
+import hashlib
+import hmac
+import base64
 from datetime import datetime, timezone
 from collections import Counter
 
+import boto3
 from strands import Agent
 from strands.models import BedrockModel
 from strands.tools import tool
+from strands.tools.mcp import MCPClient
+from mcp.client.streamable_http import streamablehttp_client
 
-from config import BEDROCK_MODEL_ID, AWS_REGION
+from config import (
+    BEDROCK_MODEL_ID,
+    AWS_REGION,
+    MEMORY_SSM_PARAM,
+    GATEWAY_URL_SSM_PARAM,
+    COGNITO_CLIENT_ID_SSM_PARAM,
+    COGNITO_CLIENT_SECRET_SSM_PARAM,
+    COGNITO_USERNAME,
+    COGNITO_PASSWORD,
+)
 from dynamo_utils import get_classifications, save_recommendations
 from github_fetcher import fetch_repo_structure
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
-# Tools available to the Recommender Agent
+# Local tool fallbacks (used when Gateway is unavailable)
 # ---------------------------------------------------------------------------
 
 @tool
@@ -37,12 +59,9 @@ def read_classification_data(repo_slug: str) -> str:
     if not items:
         return json.dumps({"error": "No classification data found for this repository."})
 
-    # Pre-compute aggregates so the LLM has easy access to summaries
     cat_counts = Counter(item.get("category", "Other") for item in items)
     sev_counts = Counter(item.get("severity", "Medium") for item in items)
-    comp_counts = Counter(item.get("affected_component", "unknown") for item in items)
 
-    # Monthly trend
     monthly = {}
     for item in items:
         closed = item.get("closed_at", "")
@@ -59,7 +78,6 @@ def read_classification_data(repo_slug: str) -> str:
         entry.update(dict(monthly[month]))
         trend_data.append(entry)
 
-    # Top hotspots with severity breakdown
     hotspots = []
     comp_items = {}
     for item in items:
@@ -78,7 +96,6 @@ def read_classification_data(repo_slug: str) -> str:
             "top_categories": [{"category": c, "count": n} for c, n in top_cats],
         })
 
-    # Security-specific items
     security_issues = [i for i in items if i.get("category") == "Security"]
 
     payload = {
@@ -123,7 +140,6 @@ def get_repository_structure(repo_owner: str, repo_name: str, github_token: str 
     try:
         token = github_token if github_token else None
         files = fetch_repo_structure(repo_owner, repo_name, token=token)
-        # Group by top-level directory for easier analysis
         dir_counts = Counter()
         for f in files:
             top_dir = f.split("/")[0] if "/" in f else "(root)"
@@ -132,10 +148,94 @@ def get_repository_structure(repo_owner: str, repo_name: str, github_token: str 
         return json.dumps({
             "total_files": len(files),
             "directory_summary": dict(dir_counts.most_common(20)),
-            "all_paths": files[:500],  # Cap to avoid context overflow
+            "all_paths": files[:500],
         })
     except Exception as e:
         return json.dumps({"error": f"Could not fetch repo structure: {str(e)}"})
+
+
+# ---------------------------------------------------------------------------
+# Memory integration helpers
+# ---------------------------------------------------------------------------
+
+def _get_ssm_parameter(name: str) -> str | None:
+    """Retrieve a parameter from SSM Parameter Store."""
+    try:
+        ssm = boto3.client("ssm", region_name=AWS_REGION)
+        response = ssm.get_parameter(Name=name, WithDecryption=True)
+        return response["Parameter"]["Value"]
+    except Exception:
+        return None
+
+
+def _get_memory_id() -> str | None:
+    """Retrieve the memory_id from SSM Parameter Store."""
+    return _get_ssm_parameter(MEMORY_SSM_PARAM)
+
+
+def _build_memory_session_manager(memory_id: str, session_id: str, actor_id: str):
+    """Create an AgentCoreMemorySessionManager for the Recommender Agent."""
+    from bedrock_agentcore.memory.integrations.strands.config import (
+        AgentCoreMemoryConfig,
+        RetrievalConfig,
+    )
+    from bedrock_agentcore.memory.integrations.strands.session_manager import (
+        AgentCoreMemorySessionManager,
+    )
+
+    memory_config = AgentCoreMemoryConfig(
+        memory_id=memory_id,
+        session_id=session_id,
+        actor_id=actor_id,
+        retrieval_config={
+            "analysis/{actorId}/patterns/": RetrievalConfig(
+                top_k=5,
+                relevance_score=0.2,
+            ),
+        },
+    )
+
+    return AgentCoreMemorySessionManager(memory_config, AWS_REGION)
+
+
+# ---------------------------------------------------------------------------
+# Gateway (MCP) integration helpers
+# ---------------------------------------------------------------------------
+
+def _get_cognito_token() -> str | None:
+    """Authenticate against Cognito and return a fresh access token."""
+    client_id = _get_ssm_parameter(COGNITO_CLIENT_ID_SSM_PARAM)
+    client_secret = _get_ssm_parameter(COGNITO_CLIENT_SECRET_SSM_PARAM)
+    if not client_id or not client_secret:
+        return None
+
+    cognito_client = boto3.client("cognito-idp", region_name=AWS_REGION)
+
+    message = bytes(COGNITO_USERNAME + client_id, "utf-8")
+    key = bytes(client_secret, "utf-8")
+    secret_hash = base64.b64encode(
+        hmac.new(key, message, digestmod=hashlib.sha256).digest()
+    ).decode()
+
+    try:
+        auth_response = cognito_client.initiate_auth(
+            ClientId=client_id,
+            AuthFlow="USER_PASSWORD_AUTH",
+            AuthParameters={
+                "USERNAME": COGNITO_USERNAME,
+                "PASSWORD": COGNITO_PASSWORD,
+                "SECRET_HASH": secret_hash,
+            },
+        )
+        return auth_response["AuthenticationResult"]["AccessToken"]
+    except Exception as e:
+        logger.warning(f"Cognito authentication failed: {e}")
+        return None
+
+
+def _get_gateway_url() -> str | None:
+    """Retrieve the Gateway MCP URL from SSM Parameter Store."""
+    return _get_ssm_parameter(GATEWAY_URL_SSM_PARAM)
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +249,10 @@ You analyze classified GitHub issue data to generate actionable insights for rep
 You have these tools:
 1. read_classification_data - Fetches all classified issues and aggregate statistics from DynamoDB
 2. get_repository_structure - Fetches the repo file tree to map affected components to real code
+
+You may also have access to memories from previous analyses of other repositories.
+If prior context is provided, use it to make comparative observations (e.g., "compared to similar
+logging frameworks, this repository has an unusually high rate of networking issues").
 
 When asked to analyze a repository, follow these steps:
 1. Call read_classification_data to get the classified issues and statistics
@@ -172,28 +276,132 @@ Do NOT be generic. Every insight should reference concrete data from the classif
 Do NOT wrap your response in markdown code fences. Output raw JSON only."""
 
 
-def generate_recommendations(repo_slug: str, github_token: str | None = None) -> dict:
+def generate_recommendations(
+    repo_slug: str,
+    github_token: str | None = None,
+    session_id: str | None = None,
+    actor_id: str = "analyzer_user",
+) -> dict:
     """Run the Recommender Agent to analyze classifications and generate insights.
+
+    Attempts to use AgentCore Gateway (MCP) for tool access. If the Gateway
+    is unavailable, falls back to local @tool functions.
 
     Args:
         repo_slug: "owner/repo" string
         github_token: Optional GitHub token for fetching repo structure
+        session_id: Session identifier for memory tracking
+        actor_id: Actor identifier for memory namespacing
 
     Returns:
-        Dict of insights (also saved to DynamoDB by the agent)
+        Dict of insights (also saved to DynamoDB)
     """
+    if not session_id:
+        session_id = str(uuid.uuid4())
+
     model = BedrockModel(
         model_id=BEDROCK_MODEL_ID,
         temperature=0.3,
         region_name=AWS_REGION,
     )
 
-    agent = Agent(
-        model=model,
-        tools=[read_classification_data, get_repository_structure],
-        system_prompt=RECOMMENDER_SYSTEM_PROMPT,
+    # Try to set up AgentCore Memory
+    session_manager = None
+    memory_id = _get_memory_id()
+    if memory_id:
+        try:
+            session_manager = _build_memory_session_manager(
+                memory_id=memory_id,
+                session_id=session_id,
+                actor_id=actor_id,
+            )
+            logger.info(f"AgentCore Memory enabled (memory_id={memory_id})")
+        except Exception as e:
+            logger.warning(f"Could not initialize memory session manager: {e}")
+            session_manager = None
+
+    # Try to set up Gateway (MCP) tools
+    gateway_url = _get_gateway_url()
+    bearer_token = _get_cognito_token() if gateway_url else None
+    use_gateway = bool(gateway_url and bearer_token)
+
+    if use_gateway:
+        logger.info(f"Using AgentCore Gateway at {gateway_url}")
+        return _run_with_gateway(
+            model=model,
+            session_manager=session_manager,
+            gateway_url=gateway_url,
+            bearer_token=bearer_token,
+            repo_slug=repo_slug,
+            github_token=github_token,
+        )
+    else:
+        logger.info("Gateway unavailable, using local tools")
+        return _run_with_local_tools(
+            model=model,
+            session_manager=session_manager,
+            repo_slug=repo_slug,
+            github_token=github_token,
+        )
+
+
+def _run_with_gateway(
+    model,
+    session_manager,
+    gateway_url: str,
+    bearer_token: str,
+    repo_slug: str,
+    github_token: str | None,
+) -> dict:
+    """Run the Recommender Agent using Gateway MCP tools."""
+    mcp_client = MCPClient(
+        lambda: streamablehttp_client(
+            gateway_url,
+            headers={"Authorization": f"Bearer {bearer_token}"},
+        )
     )
 
+    try:
+        with mcp_client:
+            tools = mcp_client.list_tools_sync()
+            logger.info(f"Gateway provides {len(tools)} tool(s)")
+
+            agent_kwargs = {
+                "model": model,
+                "tools": list(tools),
+                "system_prompt": RECOMMENDER_SYSTEM_PROMPT,
+            }
+            if session_manager:
+                agent_kwargs["session_manager"] = session_manager
+
+            agent = Agent(**agent_kwargs)
+            return _invoke_agent(agent, repo_slug, github_token)
+    except Exception as e:
+        logger.warning(f"Gateway invocation failed, falling back to local tools: {e}")
+        return _run_with_local_tools(model, session_manager, repo_slug, github_token)
+
+
+def _run_with_local_tools(
+    model,
+    session_manager,
+    repo_slug: str,
+    github_token: str | None,
+) -> dict:
+    """Run the Recommender Agent using local @tool functions."""
+    agent_kwargs = {
+        "model": model,
+        "tools": [read_classification_data, get_repository_structure],
+        "system_prompt": RECOMMENDER_SYSTEM_PROMPT,
+    }
+    if session_manager:
+        agent_kwargs["session_manager"] = session_manager
+
+    agent = Agent(**agent_kwargs)
+    return _invoke_agent(agent, repo_slug, github_token)
+
+
+def _invoke_agent(agent, repo_slug: str, github_token: str | None) -> dict:
+    """Invoke the agent and extract structured insights from the response."""
     owner, repo = repo_slug.split("/")
     token_instruction = ""
     if github_token:
@@ -208,13 +416,11 @@ def generate_recommendations(repo_slug: str, github_token: str | None = None) ->
 
     response = agent(prompt)
 
-    # Extract text from all content blocks
     response_text = ""
     for block in response.message.get("content", []):
         if isinstance(block, dict) and block.get("text"):
             response_text += block["text"]
 
-    # Try to extract JSON from the response
     insights = None
     try:
         start = response_text.find("{")
@@ -227,10 +433,9 @@ def generate_recommendations(repo_slug: str, github_token: str | None = None) ->
     if not insights:
         insights = {"raw_narrative": response_text}
 
-    # Save to DynamoDB programmatically (not via agent tool)
     try:
         save_recommendations(repo_slug, insights)
     except Exception:
-        pass  # Non-fatal — insights are still returned to the UI
+        pass
 
     return insights
