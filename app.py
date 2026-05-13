@@ -95,92 +95,6 @@ def render_monthly_distribution(issues: list[dict]):
     st.bar_chart(df)
 
 
-def _invoke_via_runtime(repo_slug: str, github_token: str | None = None) -> dict:
-    """Invoke the Recommender Agent via AgentCore Runtime."""
-    import json
-    import hashlib
-    import hmac
-    import base64
-    import boto3
-    from bedrock_agentcore_starter_toolkit import Runtime
-    from pathlib import Path
-    from config import (
-        AWS_REGION,
-        RUNTIME_ARN_SSM_PARAM,
-        COGNITO_CLIENT_ID_SSM_PARAM,
-        COGNITO_CLIENT_SECRET_SSM_PARAM,
-        COGNITO_USERNAME,
-        COGNITO_PASSWORD,
-    )
-
-    ssm = boto3.client("ssm", region_name=AWS_REGION)
-
-    # Verify runtime is deployed
-    try:
-        runtime_arn = ssm.get_parameter(Name=RUNTIME_ARN_SSM_PARAM, WithDecryption=True)["Parameter"]["Value"]
-    except Exception:
-        raise RuntimeError("AgentCore Runtime not deployed. Deploy via launch.ipynb first.")
-
-    # Get Cognito credentials and authenticate
-    client_id = ssm.get_parameter(Name=COGNITO_CLIENT_ID_SSM_PARAM, WithDecryption=True)["Parameter"]["Value"]
-    client_secret = ssm.get_parameter(Name=COGNITO_CLIENT_SECRET_SSM_PARAM, WithDecryption=True)["Parameter"]["Value"]
-
-    cognito = boto3.client("cognito-idp", region_name=AWS_REGION)
-    message = bytes(COGNITO_USERNAME + client_id, "utf-8")
-    key = bytes(client_secret, "utf-8")
-    secret_hash = base64.b64encode(
-        hmac.new(key, message, digestmod=hashlib.sha256).digest()
-    ).decode()
-
-    auth_response = cognito.initiate_auth(
-        ClientId=client_id,
-        AuthFlow="USER_PASSWORD_AUTH",
-        AuthParameters={
-            "USERNAME": COGNITO_USERNAME,
-            "PASSWORD": COGNITO_PASSWORD,
-            "SECRET_HASH": secret_hash,
-        },
-    )
-    access_token = auth_response["AuthenticationResult"]["AccessToken"]
-
-    # Invoke via Runtime
-    agentcore_runtime = Runtime()
-    agentcore_runtime._config_path = Path.cwd() / ".bedrock_agentcore.yaml"
-
-    owner, repo = repo_slug.split("/")
-    token_instruction = f" Use github_token='{github_token}' when calling get_repository_structure." if github_token else ""
-
-    response = agentcore_runtime.invoke(
-        payload={
-            "prompt": (
-                f"Analyze the classified issues for repository '{repo_slug}'. "
-                f"The owner is '{owner}' and the repo name is '{repo}'.{token_instruction} "
-                f"Read the classification data, optionally fetch the repo structure, "
-                f"and return your complete analysis as a JSON object."
-            ),
-            "repo_slug": repo_slug,
-            "github_token": github_token or "",
-            "actor_id": "streamlit_user",
-        },
-        bearer_token=access_token,
-        session_id=str(uuid.uuid4()),
-    )
-
-    response_text = response.get("response", "")
-    if not response_text:
-        return {"raw_narrative": str(response)}
-
-    try:
-        start = response_text.find("{")
-        end = response_text.rfind("}")
-        if start != -1 and end != -1:
-            return json.loads(response_text[start:end + 1])
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    return {"raw_narrative": response_text}
-
-
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
@@ -203,14 +117,6 @@ with st.sidebar:
     )
 
     fetch_button = st.button("🚀 Fetch Issues", use_container_width=True)
-
-    st.divider()
-
-    use_runtime = st.checkbox(
-        "Use AgentCore Runtime",
-        value=False,
-        help="Invoke the Recommender Agent via AgentCore Runtime instead of locally. Requires Runtime deployment.",
-    )
 
     st.divider()
 
@@ -537,29 +443,20 @@ if "issues" in st.session_state:
             if "memory_session_id" not in st.session_state:
                 st.session_state["memory_session_id"] = str(uuid.uuid4())
 
-            if use_runtime:
-                with st.spinner("Invoking Recommender Agent via AgentCore Runtime..."):
-                    try:
-                        insights = _invoke_via_runtime(repo_slug, token)
-                        st.session_state["insights"] = insights
-                        st.success("Insights generated via AgentCore Runtime!")
-                    except Exception as e:
-                        st.error(f"Runtime invocation failed: {e}")
-            else:
-                from recommender_agent import generate_recommendations
+            from recommender_agent import generate_recommendations
 
-                with st.spinner("Recommender Agent is analyzing your data (with memory)... This may take a minute."):
-                    try:
-                        insights = generate_recommendations(
-                            repo_slug,
-                            github_token=token,
-                            session_id=st.session_state["memory_session_id"],
-                            actor_id="streamlit_user",
-                        )
-                        st.session_state["insights"] = insights
-                        st.success("Insights generated and saved to DynamoDB!")
-                    except Exception as e:
-                        st.error(f"Recommendation failed: {e}")
+            with st.spinner("Recommender Agent is analyzing your data (with memory)... This may take a minute."):
+                try:
+                    insights = generate_recommendations(
+                        repo_slug,
+                        github_token=token,
+                        session_id=st.session_state["memory_session_id"],
+                        actor_id="streamlit_user",
+                    )
+                    st.session_state["insights"] = insights
+                    st.success("Insights generated and saved to DynamoDB!")
+                except Exception as e:
+                    st.error(f"Recommendation failed: {e}")
 
         # Load existing insights if not in session
         if "insights" not in st.session_state and "repo_slug" in st.session_state:
