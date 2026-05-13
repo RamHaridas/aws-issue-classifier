@@ -57,3 +57,25 @@ CLASSIFICATION_BATCH_SIZE = 15
 MEMORY_NAME = "IssueAnalyzerMemory"
 MEMORY_SSM_PARAM = "/app/issueanalyzer/agentcore/memory_id"
 MEMORY_EVENT_EXPIRY_DAYS = 90
+
+# --- AgentCore Gateway ---
+GATEWAY_SSM_PREFIX = "/app/issueanalyzer/agentcore"
+GATEWAY_NAME = "issueanalyzer-gw"
+GATEWAY_ID_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/gateway_id"
+GATEWAY_URL_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/gateway_url"
+GATEWAY_ARN_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/gateway_arn"
+GATEWAY_IAM_ROLE_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/gateway_iam_role"
+
+# --- Lambda ---
+LAMBDA_FUNCTION_NAME = "IssueAnalyzerTools"
+LAMBDA_ARN_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/lambda_arn"
+LAMBDA_ROLE_ARN_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/lambda_role_arn"
+LAMBDA_ROLE_NAME = "IssueAnalyzerLambdaRole"
+
+# --- Cognito ---
+COGNITO_POOL_ID_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/cognito_pool_id"
+COGNITO_CLIENT_ID_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/cognito_client_id"
+COGNITO_CLIENT_SECRET_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/cognito_client_secret"
+COGNITO_DISCOVERY_URL_SSM_PARAM = f"{GATEWAY_SSM_PREFIX}/cognito_discovery_url"
+COGNITO_USERNAME = "agent_user"
+COGNITO_PASSWORD = "AgentPass123!"
