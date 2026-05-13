@@ -3,21 +3,72 @@ Configuration constants for the GitHub Issue Analyzer.
 """
 
 # --- Category Taxonomy ---
-CATEGORIES = [
-    "Bug",
-    "Configuration",
-    "Security",
-    "Performance",
-    "Compatibility",
-    "Documentation",
-    "Feature Request",
-    "UI/UX",
-    "Installation/Setup",
-    "Testing",
-    "Networking",
-    "Data/Storage",
-    "Other",
-]
+CATEGORIES = {
+    "Reliability": (
+        "General crashes, hangs, deadlocks, data corruption, or correctness bugs that "
+        "don\u2019t fit a more specific functional area below. Prefer a more specific category "
+        "when one applies."
+    ),
+    "Performance/Scalability": (
+        "Slowness, high CPU/memory/disk usage, throughput limits, scaling under load, "
+        "capacity planning, sizing recommendations."
+    ),
+    "Security": (
+        "Vulnerabilities, CVEs, auth/authz flaws, data exposure, crypto weaknesses, "
+        "injection, supply-chain risk. Prefer this over \u201cReliability\u201d when the issue "
+        "has a security impact."
+    ),
+    "Networking": (
+        "Transport-layer issues: TCP/UDP, HTTP/gRPC/WebSocket, DNS, TLS, proxies, "
+        "timeouts, retries, connection pooling. NOT third-party service APIs "
+        "(use \u201cIntegration\u201d)."
+    ),
+    "Data/Storage": (
+        "Database, cache, file system, object storage, schema, migrations, queries, "
+        "indexes, persistence, data integrity. If the issue is purely about speed, "
+        "use \u201cPerformance/Scalability\u201d."
+    ),
+    "Compatibility": (
+        "Works in environment A but not B: OS version, browser, runtime version "
+        "(Python/Node/JVM), CPU architecture, dependency version ranges, API version mismatch."
+    ),
+    "Dependencies": (
+        "Dependency upgrades, peer-dependency conflicts, transitive vulnerabilities, "
+        "lockfile or package-manager problems. NOT installing the project itself "
+        "(use \u201cInstallation/Configuration\u201d)."
+    ),
+    "Installation/Configuration": (
+        "Installing, setting up, or configuring the project: install scripts, config "
+        "files, environment variables, defaults, init flow, first-run experience."
+    ),
+    "Build/CI": (
+        "Build system, compilation, packaging, release pipeline, CI workflows, "
+        "linters/formatters in CI. NOT runtime test failures (use \u201cTesting\u201d)."
+    ),
+    "Testing": (
+        "Test failures, flaky tests, missing coverage, test infrastructure, fixtures, "
+        "mocks. NOT CI pipeline issues (use \u201cBuild/CI\u201d)."
+    ),
+    "Integration": (
+        "Third-party services, SDKs, webhooks, plugins, external APIs that the project "
+        "consumes or exposes. Use \u201cNetworking\u201d only if the failure is at the transport layer."
+    ),
+    "UI/UX": (
+        "Frontend visual, layout, interaction, or usability issues. NOT accessibility "
+        "(use \u201cAccessibility\u201d)."
+    ),
+    "Accessibility": (
+        "Screen-reader support, keyboard navigation, color contrast, ARIA, WCAG compliance."
+    ),
+    "Documentation": (
+        "Missing, incorrect, unclear, or outdated documentation: README, API reference, "
+        "examples, tutorials, code comments. (See cross-dimension rule below.)"
+    ),
+    "Logging/Observability": (
+        "Log output, log levels, error-message clarity, metrics, traces, debugging affordances."
+    ),
+    "Other": "Use ONLY if no category above plausibly fits.",
+}
 
 SEVERITIES = [
     "Critical",
